@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Networking + EC2 Project
+  Creates a custom VPC with a public subnet, Internet Gateway,
+  Route Table, and an EC2 instance running a simple web server.
+
+# -------------------------------------------------------
+# PARAMETERS — change these before deploying
+# -------------------------------------------------------
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 Key Pair for SSH access
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+    Description: EC2 instance type (t2.micro is free tier eligible)
+
+  MyIP:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Your IP address for SSH access (e.g. 203.0.113.5/32). Use 0.0.0.0/0 to allow all.
+
+# -------------------------------------------------------
+# MAPPINGS — Amazon Linux 2 AMI per region
+# -------------------------------------------------------
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c02fb55956c7d316
+    us-east-2:
+      AMI: ami-0b0af3577fe5e3532
+    us-west-1:
+      AMI: ami-0d9858aa3c6322f73
+    us-west-2:
+      AMI: ami-098e42ae54c764c35
+    ap-south-1:
+      AMI: ami-0a23ccb2cdd9286bb
+    eu-west-1:
+      AMI: ami-0d71ea30463e0ff49
+
+# -------------------------------------------------------
+# RESOURCES
+# -------------------------------------------------------
+Resources:
+
+  # --- VPC ---
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  # --- Internet Gateway ---
+  MyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyInternetGateway
+
+  # Attach Internet Gateway to VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref MyInternetGateway
+
+  # --- Public Subnet ---
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true   # Auto-assign public IP to instances
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+
+  # --- Route Table ---
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  # Route: all traffic (0.0.0.0/0) goes to Internet Gateway
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyInternetGateway
+
+  # Associate Route Table with Subnet
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- Security Group ---
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH access
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0       # HTTP from anywhere
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIP        # SSH from your IP only
+      Tags:
+        - Key: Name
+          Value: WebServerSG
+
+  # --- EC2 Instance ---
+  WebServerEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      ImageId: !FindInMap [RegionAMI, !Ref AWS::Region, AMI]
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebServerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: WebServer
+      UserData:
+        # This script runs on first boot and installs Apache
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Hello from AWS EC2!</h1>
+          <p>Deployed with CloudFormation</p>
+          <p>VPC + Subnet + Internet Gateway + Route Table + EC2</p>" \
+          > /var/www/html/index.html
+
+# -------------------------------------------------------
+# OUTPUTS — shown after stack creation
+# -------------------------------------------------------
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref MyVPC
+
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet
+
+  EC2PublicIP:
+    Description: Public IP of the EC2 instance
+    Value: !GetAtt WebServerEC2.PublicIp
+
+  WebsiteURL:
+    Description: Open this URL in your browser to see the web server
+    Value: !Sub http://${WebServerEC2.PublicIp}
